@@ -4,42 +4,75 @@ var Match = require('./Match');
 
 io.set('log level', 1);
 
+var MAX_PLAYERS = 2;
+var ROUND_SECONDS = 5;
+
 function Server () {
 	this.players = [];  // Player objects
 	this.playersWaiting = [];  // player id
+	this.playerGroups = [];
+	this.playerGroupsWaiting = [];
 	this.matches = [];  // Match objects
 	this.ongoingMatches = [];  // match id
 }
 
+Server.prototype.handleGroup = function(player, code) {
+	if ( this.playerGroups[code] == undefined )
+		this.playerGroups[code] = [];
+	if ( this.playerGroups[code].length <= MAX_PLAYERS )
+	{
+		this.playerGroups[code].push( player );
+		var a = [];
+		for (var i = 0; i < this.playerGroups[code].length; i++) {
+			p = this.playerGroups[code][i];
+			a.push({id: p.socketId, username: p.username});
+		};
+		io.sockets.sockets[player.socketId].emit( "grouped", a );
+	}
+	else
+	{
+		io.sockets.sockets[player.socketId].emit( "failedToGroup" );
+	}
+};
+
+Server.prototype.matchMake = function() {
+	console.log("new Match");
+	var matchPlayers = [];
+	for (var i = 0; i < MAX_PLAYERS; ++i)
+	{
+		var plId = this.playersWaiting.shift();
+		var pl = this.players[plId];
+		matchPlayers.push( pl );
+	}
+
+	var match = new Match( matchPlayers );
+	var matchId = this.matches.length;
+	this.matches.push( match );
+
+	for (var i = 0; i < MAX_PLAYERS; ++i)
+	{
+		var plId = matchPlayers[i].socketId;
+		this.players[plId].matchId = matchId;
+		if ( this.players[plId].alive )
+			io.sockets.sockets[plId].emit( "startGame", match );
+	}
+};
+
 Server.prototype.start = function() {
 	var self = this;
 	io.sockets.on('connection', function (socket) {
-		socket.on('join', function (username) {
+		socket.on('join', function (request) {
 			console.log('join');
-			self.players[socket.id] = new Player(username, socket.id);
-			self.playersWaiting.push(socket.id);
-
-			while (self.playersWaiting.length >= 2)
+			self.players[socket.id] = new Player(request.username, socket.id);
+			if ( request.code != "" )
+				self.handleGroup( self.players[socket.id], request.code );
+			else
 			{
-				console.log("new Match");
-				var matchPlayers = [];
-				for (var i = 0; i < 2; ++i)
-				{
-					var plId = self.playersWaiting.shift();
-					var pl = self.players[plId];
-					matchPlayers.push( pl );
-				}
+				self.playersWaiting.push(socket.id);
 
-				var match = new Match( matchPlayers );
-				var matchId = self.matches.length;
-				self.matches.push( match );
-
-				for (var i = 0; i < 2; ++i)
+				while (self.playersWaiting.length >= MAX_PLAYERS)
 				{
-					var plId = matchPlayers[i].socketId;
-					self.players[plId].matchId = matchId;
-					if ( self.players[plId].alive )
-						io.sockets.sockets[plId].emit( "startGame", match );
+					self.matchMake();
 				}
 			}
 		});
@@ -82,6 +115,12 @@ Server.prototype.start = function() {
 			};
 			self.players[plId] = undefined;
 		});
+
+		socket.on( 'groupReady', function (data){
+			var pg = self.playerGroups.splice(data,1);
+			self.playersWaiting.push(pg);
+			self.matchMake();
+		});
 	});
 	setInterval(this.loop.bind(this), 1000);
 };
@@ -90,7 +129,7 @@ Server.prototype.start = function() {
 Server.prototype.loop = function() {
 	console.log("Loop");
 	console.log(JSON.stringify(this));
-	while( this.ongoingMatches.length > 0 && +new Date() - this.matches[this.ongoingMatches[0]].lastRoundTimeStart >= 5*1000 )
+	while( this.ongoingMatches.length > 0 && +new Date() - this.matches[this.ongoingMatches[0]].lastRoundTimeStart >= ROUND_SECONDS*1000 )
 	{
 		console.log(+new Date() - this.matches[this.ongoingMatches[0]].lastRoundTimeStart);
 		var matchId = this.ongoingMatches.shift();
@@ -108,7 +147,7 @@ Server.prototype.loop = function() {
 			};
 			for (var i = 0; i < match.players.length; i++) {
 				match.players[i].ready = false;
-				if ( match.players[i] != undefined && match.players[i].alive )
+				if ( match.players[i] != undefined && io.sockets.sockets[match.players[i].socketId] && match.players[i].alive )
 					io.sockets.sockets[match.players[i].socketId].emit( "endRound", actions );
 			};
 		}
